@@ -1,0 +1,77 @@
+image: docker:19.03.10
+
+variables:
+  # DOCKER_HOST: tcp://0.0.0.0:2375/
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_AUTH_CONFIG: "{\"credsStore\": \"ecr-login\"}"
+
+services:
+  - docker:dind
+
+stages:   
+  - build
+  - deploy
+
+before_script:
+    - apk add --update --no-cache curl jq python3 py3-pip bash
+    - pip3 install awscli
+    - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+
+dev-build-job:
+  stage: build
+  script:
+    # - export DOCKER_HOST=tcp://0.0.0.0:2375/
+    - echo $AWS_ACCESS_KEY_ID
+    - echo $AWS_DEFAULT_REGION
+    - echo $AWS_SECRET_ACCESS_KEY
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+    - docker build -t $REPOSITORY_URL:$IMAGE_TAG .
+    - docker push $REPOSITORY_URL:$IMAGE_TAG
+  only:
+    - dev
+
+  tags:
+    - gallerist-node
+
+
+dev-deploy-job:
+  stage: deploy
+  script:
+    - echo `aws ecs describe-task-definition --task-definition  $AWS_ECS_TASK_DEFINITION --region $AWS_DEFAULT_REGION` > input.json
+    - echo $(cat input.json | jq '.taskDefinition.containerDefinitions[].image="'$REPOSITORY_URL':'$IMAGE_TAG'"') > input.json
+    - echo $(cat input.json | jq '.taskDefinition') > input.json
+    - echo $(cat input.json | jq  'del(.taskDefinitionArn)' | jq 'del(.revision)' | jq 'del(.status)' | jq 'del(.requiresAttributes)' | jq 'del(.compatibilities)' | jq 'del(.registeredAt)' | jq 'del(.registeredBy)') > input.json
+    - aws ecs register-task-definition --cli-input-json file://input.json --region $AWS_DEFAULT_REGION 
+    - revision=$(aws ecs describe-task-definition --task-definition $AWS_ECS_TASK_DEFINITION --region $AWS_DEFAULT_REGION | egrep "revision" | tr "/" " " | awk '{print $2}' | sed 's/"$//' | cut -d "," -f 1)
+    - aws ecs update-service --cluster $AWS_ECS_CLUSTER --service $AWS_ECS_SERVICE  --task-definition $AWS_ECS_TASK_DEFINITION:$revision --region $AWS_DEFAULT_REGION
+
+    # - DESCRIBED_SERVICE=$(aws ecs describe-services --region $AWS_DEFAULT_REGION --cluster $AWS_ECS_CLUSTER --services $AWS_ECS_SERVICE);
+    # - CURRENT_DESIRED_COUNT=$(echo $DECRIBED_SERVICE | jq --raw-output ".services[0].desiredCount")
+    # - echo $CURRENT_DESIRED_COUNT
+
+    # - CURRENT_TASK_REVISION=$(echo $DESCRIBED_SERVICE | jq -r ".services[0].taskDefinition")
+    # - echo "Current Task definition in Service" + $CURRENT_TASK_REVISION
+
+    # - CURRENT_RUNNING_TASK=$(echo $DESCRIBED_SERVICE | jq -r ".services[0].runningCount")
+    # - echo $CURRENT_RUNNING_TASK
+
+    # - CURRENT_STALE_TASK=$(echo $DESCRIBED_SERVICE | jq -r ".services[0].deployments | .[] | select(.taskDefinition != \"$CURRENT_TASK_REVISION\") | .taskDefinition")
+    # - echo "Task defn apart from current service Taskdefn" +  $CURRENT_STALE_TASK
+    # - echo $CURRENT_STALE_TASK
+
+    # - tasks=$(aws ecs --region $AWS_DEFAULT_REGION list-tasks --cluster $AWS_ECS_CLUSTER --family $AWS_ECS_TASK_DEFINITION | jq -r '.taskArns | map(.[0:]) | reduce .[] as $item (""; . + $item + " ")')
+    # - echo "Tasks are as follows"
+    # - echo $tasks
+
+    # - aws ecs --region $AWS_DEFAULT_REGION stop-task --cluster $AWS_ECS_CLUSTER --task $tasks
+
+    # # Run new tasks with the updated new Task-definition
+    # - aws ecs --region $AWS_DEFAULT_REGION run-task --cluster $AWS_ECS_CLUSTER --task-definition $CURRENT_TASK_REVISION
+
+  only:
+    - dev
+  # when: manual
+
+  tags:
+    - gallerist-node
